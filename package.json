@@ -1,0 +1,17 @@
+{
+  "name": "webgl",
+  "author": "Arthur <arthur@corenzan.com>",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "source": "src/index.html",
+  "scripts": {
+    "start": "parcel",
+    "build": "parcel build"
+  },
+  "devDependencies": {
+    "@tsconfig/recommended": "^1.0.6",
+    "@webgpu/types": "^0.1.42",
+    "parcel": "^2.12.0",
+    "typescript": "^5.4.5"
+  }
+}

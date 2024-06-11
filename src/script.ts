@@ -30,12 +30,13 @@ async function getWebGPU() {
 async function main() {
   const { canvas, context, device, format } = await getWebGPU();
 
-  canvas.height = 480;
+  canvas.height = 640;
   canvas.width = canvas.height;
 
-  const GRID_SIZE = 256;
+  const CELL_SIZE = 0.5;
+  const GRID_SIZE = 128;
   const WORKGROUP_SIZE = 8;
-  const STEP_RATE = 100;
+  const STEP_RATE = 50;
 
   const gridSizeData = new Float32Array([GRID_SIZE, GRID_SIZE]);
   const gridSizeBuffer = device.createBuffer({
@@ -64,20 +65,19 @@ async function main() {
   }
   device.queue.writeBuffer(gridStateBuffers[0], 0, gridStateData);
 
-  const size = 1;
   const cellVertexData = new Float32Array([
-    -size,
-    -size,
-    size,
-    -size,
-    size,
-    size,
-    -size,
-    -size,
-    size,
-    size,
-    -size,
-    size,
+    -CELL_SIZE,
+    -CELL_SIZE,
+    CELL_SIZE,
+    -CELL_SIZE,
+    CELL_SIZE,
+    CELL_SIZE,
+    -CELL_SIZE,
+    -CELL_SIZE,
+    CELL_SIZE,
+    CELL_SIZE,
+    -CELL_SIZE,
+    CELL_SIZE,
   ]);
   const cellVertexBuffer = device.createBuffer({
     label: "Cell Vertex",
@@ -118,7 +118,7 @@ async function main() {
       @fragment
       fn fmain(input: VertexOutput) -> @location(0) vec4f {
           let color = input.cell / grid;
-          return vec4f(1 - color.y, color, 1);
+          return vec4f(color.xy+0.5, 1.5 - color.x, 1);
       }
     `,
   });

@@ -1,5 +1,19 @@
 * {
   box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+  margin: unset;
+  padding: unset;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  align-items: center;
+  display: flex;
+}
+
+canvas {
+  margin-inline: auto;
 }

@@ -11,20 +11,20 @@ async function getWebGPU() {
     throw new Error("No GPUAdapter found.");
   }
 
+  const device = await adapter.requestDevice();
+  const format = navigator.gpu.getPreferredCanvasFormat();
+
   const context = canvas.getContext("webgpu");
   if (!context) {
     throw new Error("WebGPU context failed.");
   }
-
-  const device = await adapter.requestDevice();
-  const format = navigator.gpu.getPreferredCanvasFormat();
 
   context.configure({
     device,
     format,
   });
 
-  return { canvas, context, device, format };
+  return { canvas, context, device, format } as const;
 }
 
 async function main() {
@@ -34,9 +34,9 @@ async function main() {
   canvas.width = canvas.height;
 
   const CELL_SIZE = 0.5;
-  const GRID_SIZE = 128;
+  const GRID_SIZE = 64;
   const WORKGROUP_SIZE = 8;
-  const STEP_RATE = 50;
+  const STEP_RATE = 500;
 
   const gridSizeData = new Float32Array([GRID_SIZE, GRID_SIZE]);
   const gridSizeBuffer = device.createBuffer({
@@ -86,85 +86,8 @@ async function main() {
   });
   device.queue.writeBuffer(cellVertexBuffer, 0, cellVertexData);
 
-  const cellShaderModule = device.createShaderModule({
-    label: "Cell Shader",
-    code: /*wgsl*/ `
-      @group(0) @binding(0) var<uniform> grid: vec2f;
-      @group(0) @binding(1) var<storage> state: array<u32>;
-
-      struct VertexInput {
-          @location(0) position: vec2f,
-          @builtin(instance_index) instance: u32,
-      };
-
-      struct VertexOutput {
-          @location(0) cell: vec2f,
-          @builtin(position) position: vec4f,
-      };
-
-      @vertex
-      fn vmain(input: VertexInput) -> VertexOutput {
-          let i = f32(input.instance);
-          let cell = vec2f(i % grid.x, floor(i / grid.x));
-          let offset = cell / grid * 2;
-          let position = (input.position * f32(state[input.instance]) + 1) / grid - 1 + offset;
-
-          var output: VertexOutput;
-          output.position = vec4f(position, 0, 1);
-          output.cell = cell;
-          return output;
-      }
-
-      @fragment
-      fn fmain(input: VertexOutput) -> @location(0) vec4f {
-          let color = input.cell / grid;
-          return vec4f(color.xy+0.5, 1.5 - color.x, 1);
-      }
-    `,
-  });
-
-  const simulationShaderModule = device.createShaderModule({
-    label: "Simulation",
-    code: /*wgsl*/ `
-      @group(0) @binding(0) var<uniform> grid: vec2f;
-      @group(0) @binding(1) var<storage> state_in: array<u32>;
-      @group(0) @binding(2) var<storage, read_write> state_out: array<u32>;
-
-      fn cell_index(cell: vec2u) -> u32 {
-        return (cell.y % u32(grid.y)) * u32(grid.x) + (cell.x % u32(grid.x));
-      }
-
-      fn cell_state(x: u32, y: u32) -> u32 {
-        return state_in[cell_index(vec2u(x, y))];
-      }
-
-      @compute
-      @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
-      fn cmain(@builtin(global_invocation_id) cell: vec3u) {
-        let active_neighbors = cell_state(cell.x+1, cell.y+1) + cell_state(cell.x+1, cell.y) +
-          cell_state(cell.x+1, cell.y-1) + cell_state(cell.x, cell.y-1) +
-          cell_state(cell.x-1, cell.y-1) + cell_state(cell.x-1, cell.y) +
-          cell_state(cell.x-1, cell.y+1) + cell_state(cell.x, cell.y+1);
-
-        let i = cell_index(cell.xy);
-
-        switch active_neighbors {
-          case 2: {
-            state_out[i] = state_in[i];
-          }
-          case 3: {
-            state_out[i] = 1;
-          }
-          default: {
-            state_out[i] = 0;
-          }
-        }
-      }
-    `,
-  });
-
   const bindGroupLayout = device.createBindGroupLayout({
-    label: "Cell Bind Group Layout",
+    label: "Bind Group Layout",
     entries: [
       {
         binding: 0,
@@ -172,7 +95,9 @@ async function main() {
           GPUShaderStage.VERTEX |
           GPUShaderStage.FRAGMENT |
           GPUShaderStage.COMPUTE,
-        buffer: {},
+        buffer: {
+          type: "uniform",
+        },
       },
       {
         binding: 1,
@@ -206,6 +131,7 @@ async function main() {
         },
       ],
     }),
+
     device.createBindGroup({
       label: "Bind Group B",
       layout: bindGroupLayout,
@@ -226,17 +152,93 @@ async function main() {
     }),
   ];
 
-  const pipelineLayout = device.createPipelineLayout({
-    label: "Cell Pipeline Layout",
+  const pipelinesSharedLayout = device.createPipelineLayout({
+    label: "Pipelines Shared Layout",
     bindGroupLayouts: [bindGroupLayout],
   });
 
-  const cellRenderPipeline = device.createRenderPipeline({
-    label: "Cell Render Pipeline",
-    layout: pipelineLayout,
+  const renderShaderModule = device.createShaderModule({
+    label: "Render Shader Module",
+    code: /*wgsl*/ `
+      @group(0) @binding(0) var<uniform> gridSize: vec2f;
+      @group(0) @binding(1) var<storage> gridCurrentState: array<u32>;
+
+      struct VertexInput {
+        @location(0) position: vec2f,
+        @builtin(instance_index) index: u32,
+      };
+
+      struct VertexOutput {
+        @location(0) cell: vec2f,
+        @builtin(position) position: vec4f,
+      };
+
+      @vertex
+      fn vmain(input: VertexInput) -> VertexOutput {
+        let i = f32(input.index);
+        let cell = vec2f(i % gridSize.x, floor(i / gridSize.x));
+        let offset = cell / gridSize * 2;
+        let position = (input.position * f32(gridCurrentState[input.index]) + 1) / gridSize - 1 + offset;
+
+        var output: VertexOutput;
+        output.position = vec4f(position, 0, 1);
+        output.cell = cell;
+        return output;
+      }
+
+      @fragment
+      fn fmain(input: VertexOutput) -> @location(0) vec4f {
+        let index = input.cell / gridSize;
+        return vec4f(index.xy, 1 - index.x, 1) + vec4f(0.25);
+      }
+    `,
+  });
+
+  const simulationShaderModule = device.createShaderModule({
+    label: "Simulation Shader Module",
+    code: /*wgsl*/ `
+      @group(0) @binding(0) var<uniform> gridSize: vec2f;
+      @group(0) @binding(1) var<storage> gridCurrentState: array<u32>;
+      @group(0) @binding(2) var<storage, read_write> gridNextState: array<u32>;
+
+      fn indexOf(x: u32, y: u32) -> u32 {
+        return (y % u32(gridSize.y)) * u32(gridSize.x) + (x % u32(gridSize.x));
+      }
+
+      fn stateOf(x: u32, y: u32) -> u32 {
+        return gridCurrentState[indexOf(x, y)];
+      }
+
+      @compute
+      @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
+      fn cmain(@builtin(global_invocation_id) cell: vec3u) {
+        let n = stateOf(cell.x + 1, cell.y + 1) + stateOf(cell.x + 1, cell.y) +
+          stateOf(cell.x + 1, cell.y - 1) + stateOf(cell.x, cell.y - 1) +
+          stateOf(cell.x - 1, cell.y - 1) + stateOf(cell.x - 1, cell.y) +
+          stateOf(cell.x - 1, cell.y + 1) + stateOf(cell.x, cell.y + 1);
+
+        let i = indexOf(cell.x, cell.y);
+
+        switch n {
+          case 2: {
+            gridNextState[i] = gridCurrentState[i];
+          }
+          case 3: {
+            gridNextState[i] = 1;
+          }
+          default: {
+            gridNextState[i] = 0;
+          }
+        }
+      }
+    `,
+  });
+
+  const renderPipeline = device.createRenderPipeline({
+    label: "Render Pipeline",
+    layout: pipelinesSharedLayout,
     vertex: {
-      module: cellShaderModule,
-      entryPoint: "vmain",
+      module: renderShaderModule,
       buffers: [
         {
           arrayStride: 8,
@@ -251,8 +253,7 @@ async function main() {
       ],
     },
     fragment: {
-      module: cellShaderModule,
-      entryPoint: "fmain",
+      module: renderShaderModule,
       targets: [
         {
           format: format,
@@ -263,54 +264,56 @@ async function main() {
 
   const simulationPipeline = device.createComputePipeline({
     label: "Simulation Pipeline",
-    layout: pipelineLayout,
+    layout: pipelinesSharedLayout,
     compute: {
       module: simulationShaderModule,
-      entryPoint: "cmain",
     },
   });
 
-  let step = 0;
-  let lastUpdateTime = 0;
+  let lastSimulationTime = 0;
+  let lastRenderTime = 0;
+  let step = 1;
 
-  function draw(time: number) {
-    const updateTimeDelta = time - lastUpdateTime;
+  function render(time: number) {
+    const simulationTimeDelta = time - lastSimulationTime;
+    const renderTimeDelta = time - lastRenderTime;
+    lastRenderTime = time;
+
+    requestAnimationFrame(render);
 
     const encoder = device.createCommandEncoder();
 
-    if (updateTimeDelta >= STEP_RATE) {
+    if (simulationTimeDelta >= STEP_RATE) {
+      lastSimulationTime = time;
+      step += 1;
+
       const computePass = encoder.beginComputePass();
       const workgroupCount = Math.ceil(GRID_SIZE / WORKGROUP_SIZE);
       computePass.setPipeline(simulationPipeline);
       computePass.setBindGroup(0, bindGroups[step % 2]);
       computePass.dispatchWorkgroups(workgroupCount, workgroupCount);
       computePass.end();
-
-      step += 1;
-      lastUpdateTime = time;
     }
 
     const renderPass = encoder.beginRenderPass({
       colorAttachments: [
         {
           view: context.getCurrentTexture().createView(),
-          loadOp: "clear",
-          storeOp: "store",
+          loadOp: "clear" as const,
+          storeOp: "store" as const,
         },
       ],
     });
-    renderPass.setPipeline(cellRenderPipeline);
+    renderPass.setPipeline(renderPipeline);
     renderPass.setVertexBuffer(0, cellVertexBuffer);
     renderPass.setBindGroup(0, bindGroups[step % 2]);
     renderPass.draw(cellVertexData.length / 2, GRID_SIZE * GRID_SIZE);
     renderPass.end();
 
     device.queue.submit([encoder.finish()]);
-
-    requestAnimationFrame(draw);
   }
 
-  requestAnimationFrame(draw);
+  requestAnimationFrame(render);
 }
 
 main();

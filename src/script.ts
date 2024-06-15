@@ -34,7 +34,7 @@ async function main() {
   canvas.width = canvas.height;
 
   const CELL_SIZE = 0.5;
-  const GRID_SIZE = 96;
+  const GRID_SIZE = 64;
   const WORKGROUP_SIZE = 8;
   const STEP_RATE = 200;
 
@@ -45,6 +45,14 @@ async function main() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   device.queue.writeBuffer(timeBuffer, 0, timeData);
+
+  const mouseData = new Float32Array([0, 0, 0]);
+  const mouseBuffer = device.createBuffer({
+    label: "Mouse",
+    size: mouseData.byteLength,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(mouseBuffer, 0, mouseData);
 
   const gridSizeData = new Float32Array([GRID_SIZE, GRID_SIZE]);
   const gridSizeBuffer = device.createBuffer({
@@ -67,9 +75,9 @@ async function main() {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     }),
   ];
-  for (let i = 0; i < gridStateData.length; i += 1) {
-    gridStateData[i] = Math.random() >= 0.6 ? 1 : 0;
-  }
+  // for (let i = 0; i < gridStateData.length; i += 1) {
+  //   gridStateData[i] = Math.random() >= 0.6 ? 1 : 0;
+  // }
   device.queue.writeBuffer(gridStateBuffers[1], 0, gridStateData);
   device.queue.writeBuffer(gridStateBuffers[0], 0, gridStateData);
 
@@ -119,11 +127,21 @@ async function main() {
       },
       {
         binding: 2,
+        visibility:
+          GPUShaderStage.VERTEX |
+          GPUShaderStage.FRAGMENT |
+          GPUShaderStage.COMPUTE,
+        buffer: {
+          type: "uniform",
+        },
+      },
+      {
+        binding: 3,
         visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
         buffer: { type: "read-only-storage" },
       },
       {
-        binding: 3,
+        binding: 4,
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "storage" },
       },
@@ -141,15 +159,19 @@ async function main() {
         },
         {
           binding: 1,
-          resource: { buffer: gridSizeBuffer },
+          resource: { buffer: mouseBuffer },
         },
         {
           binding: 2,
-          resource: { buffer: gridStateBuffers[0] },
+          resource: { buffer: gridSizeBuffer },
         },
         {
           binding: 3,
           resource: { buffer: gridStateBuffers[1] },
+        },
+        {
+          binding: 4,
+          resource: { buffer: gridStateBuffers[0] },
         },
       ],
     }),
@@ -164,15 +186,19 @@ async function main() {
         },
         {
           binding: 1,
-          resource: { buffer: gridSizeBuffer },
+          resource: { buffer: mouseBuffer },
         },
         {
           binding: 2,
-          resource: { buffer: gridStateBuffers[1] },
+          resource: { buffer: gridSizeBuffer },
         },
         {
           binding: 3,
           resource: { buffer: gridStateBuffers[0] },
+        },
+        {
+          binding: 4,
+          resource: { buffer: gridStateBuffers[1] },
         },
       ],
     }),
@@ -187,8 +213,9 @@ async function main() {
     label: "Render Shader Module",
     code: /*wgsl*/ `
       @group(0) @binding(0) var<uniform> time: f32;
-      @group(0) @binding(1) var<uniform> gridSize: vec2f;
-      @group(0) @binding(2) var<storage> gridCurrentState: array<u32>;
+      @group(0) @binding(1) var<uniform> mouse: vec3f;
+      @group(0) @binding(2) var<uniform> gridSize: vec2f;
+      @group(0) @binding(3) var<storage> gridCurrentState: array<u32>;
 
       struct VertexInput {
         @location(0) position: vec2f,
@@ -253,9 +280,10 @@ async function main() {
     label: "Simulation Shader Module",
     code: /*wgsl*/ `
       @group(0) @binding(0) var<uniform> time: f32;
-      @group(0) @binding(1) var<uniform> gridSize: vec2f;
-      @group(0) @binding(2) var<storage> gridCurrentState: array<u32>;
-      @group(0) @binding(3) var<storage, read_write> gridNextState: array<u32>;
+      @group(0) @binding(1) var<uniform> mouse: vec3f;
+      @group(0) @binding(2) var<uniform> gridSize: vec2f;
+      @group(0) @binding(3) var<storage> gridCurrentState: array<u32>;
+      @group(0) @binding(4) var<storage, read_write> gridNextState: array<u32>;
 
       fn indexOf(x: u32, y: u32) -> u32 {
         return (y % u32(gridSize.y)) * u32(gridSize.x) + (x % u32(gridSize.x));
@@ -268,12 +296,24 @@ async function main() {
       @compute
       @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
       fn cmain(@builtin(global_invocation_id) cell: vec3u) {
+        let i = indexOf(cell.x, cell.y);
+
+        if ((u32(mouse.z) & 1) == 1) {
+          let mouseGridPosition = vec2u(
+            u32(floor((mouse.x + 1) / 2 * gridSize.x)),
+            u32(floor((mouse.y + 1) / 2 * gridSize.y))
+          );
+
+          if (all(mouseGridPosition == cell.xy)) {
+            gridNextState[i] = 1;
+          }
+          return;
+        }
+
         let n = stateOf(cell.x + 1, cell.y + 1) + stateOf(cell.x + 1, cell.y) +
           stateOf(cell.x + 1, cell.y - 1) + stateOf(cell.x, cell.y - 1) +
           stateOf(cell.x - 1, cell.y - 1) + stateOf(cell.x - 1, cell.y) +
           stateOf(cell.x - 1, cell.y + 1) + stateOf(cell.x, cell.y + 1);
-
-        let i = indexOf(cell.x, cell.y);
 
         switch n {
           case 2: {
@@ -330,6 +370,29 @@ async function main() {
   let lastRenderTime = 0;
   let step = 1;
 
+  const mouse = { x: 0, y: 0, pressed: 0 };
+
+  canvas.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+
+    mouse.pressed = event.buttons;
+  });
+
+  canvas.addEventListener("mouseup", (event) => {
+    event.preventDefault();
+
+    mouse.pressed = event.buttons;
+  });
+
+  canvas.addEventListener("mousemove", (event) => {
+    mouse.x = (event.offsetX / canvas.width) * 2 - 1;
+    mouse.y = (event.offsetY / canvas.height) * -2 + 1;
+  });
+
+  canvas.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+  });
+
   function render(time: number) {
     const simulationTimeDelta = time - lastSimulationTime;
     const renderTimeDelta = time - lastRenderTime;
@@ -342,7 +405,10 @@ async function main() {
     timeData.set([time]);
     device.queue.writeBuffer(timeBuffer, 0, timeData);
 
-    if (simulationTimeDelta >= STEP_RATE) {
+    mouseData.set([mouse.x, mouse.y, mouse.pressed]);
+    device.queue.writeBuffer(mouseBuffer, 0, mouseData);
+
+    if (simulationTimeDelta >= 1) {
       lastSimulationTime = time;
       step += 1;
 

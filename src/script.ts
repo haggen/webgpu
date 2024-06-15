@@ -30,13 +30,21 @@ async function getWebGPU() {
 async function main() {
   const { canvas, context, device, format } = await getWebGPU();
 
-  canvas.height = 640;
+  canvas.height = 480;
   canvas.width = canvas.height;
 
   const CELL_SIZE = 0.5;
-  const GRID_SIZE = 64;
+  const GRID_SIZE = 96;
   const WORKGROUP_SIZE = 8;
-  const STEP_RATE = 500;
+  const STEP_RATE = 200;
+
+  const timeData = new Float32Array([0]);
+  const timeBuffer = device.createBuffer({
+    label: "Time",
+    size: timeData.byteLength,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(timeBuffer, 0, timeData);
 
   const gridSizeData = new Float32Array([GRID_SIZE, GRID_SIZE]);
   const gridSizeBuffer = device.createBuffer({
@@ -59,10 +67,10 @@ async function main() {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     }),
   ];
-  device.queue.writeBuffer(gridStateBuffers[1], 0, gridStateData);
   for (let i = 0; i < gridStateData.length; i += 1) {
-    gridStateData[i] = Math.random() >= 0.5 ? 1 : 0;
+    gridStateData[i] = Math.random() >= 0.6 ? 1 : 0;
   }
+  device.queue.writeBuffer(gridStateBuffers[1], 0, gridStateData);
   device.queue.writeBuffer(gridStateBuffers[0], 0, gridStateData);
 
   const cellVertexData = new Float32Array([
@@ -101,11 +109,21 @@ async function main() {
       },
       {
         binding: 1,
+        visibility:
+          GPUShaderStage.VERTEX |
+          GPUShaderStage.FRAGMENT |
+          GPUShaderStage.COMPUTE,
+        buffer: {
+          type: "uniform",
+        },
+      },
+      {
+        binding: 2,
         visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
         buffer: { type: "read-only-storage" },
       },
       {
-        binding: 2,
+        binding: 3,
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "storage" },
       },
@@ -119,14 +137,18 @@ async function main() {
       entries: [
         {
           binding: 0,
-          resource: { buffer: gridSizeBuffer },
+          resource: { buffer: timeBuffer },
         },
         {
           binding: 1,
-          resource: { buffer: gridStateBuffers[0] },
+          resource: { buffer: gridSizeBuffer },
         },
         {
           binding: 2,
+          resource: { buffer: gridStateBuffers[0] },
+        },
+        {
+          binding: 3,
           resource: { buffer: gridStateBuffers[1] },
         },
       ],
@@ -138,14 +160,18 @@ async function main() {
       entries: [
         {
           binding: 0,
-          resource: { buffer: gridSizeBuffer },
+          resource: { buffer: timeBuffer },
         },
         {
           binding: 1,
-          resource: { buffer: gridStateBuffers[1] },
+          resource: { buffer: gridSizeBuffer },
         },
         {
           binding: 2,
+          resource: { buffer: gridStateBuffers[1] },
+        },
+        {
+          binding: 3,
           resource: { buffer: gridStateBuffers[0] },
         },
       ],
@@ -160,8 +186,9 @@ async function main() {
   const renderShaderModule = device.createShaderModule({
     label: "Render Shader Module",
     code: /*wgsl*/ `
-      @group(0) @binding(0) var<uniform> gridSize: vec2f;
-      @group(0) @binding(1) var<storage> gridCurrentState: array<u32>;
+      @group(0) @binding(0) var<uniform> time: f32;
+      @group(0) @binding(1) var<uniform> gridSize: vec2f;
+      @group(0) @binding(2) var<storage> gridCurrentState: array<u32>;
 
       struct VertexInput {
         @location(0) position: vec2f,
@@ -186,10 +213,38 @@ async function main() {
         return output;
       }
 
+      const animationLength = 1000.0;
+
       @fragment
       fn fmain(input: VertexOutput) -> @location(0) vec4f {
-        let index = input.cell / gridSize;
-        return vec4f(index.xy, 1 - index.x, 1) + vec4f(0.25);
+        // let index = input.cell / gridSize;
+
+        let l = time / animationLength; // Loop count.
+        let p = l % 1; // Loop progress.
+        var color = vec3f(0);
+
+        switch u32(floor(l % 6)) {
+          case 0: {
+            color = vec3f(1, mix(0, 1, p), 0);
+          }
+          case 1: {
+            color = vec3f(mix(1, 0, p), 1, 0);
+          }
+          case 2: {
+            color = vec3f(0, 1, mix(0, 1, p));
+          }
+          case 3: {
+            color = vec3f(0, mix(1, 0, p), 1);
+          }
+          case 4: {
+            color = vec3f(mix(0, 1, p), 0, 1);
+          }
+          default: {
+            color = vec3f(1, 0, mix(1, 0, p));
+          }
+        }
+
+        return vec4f(color + 0.25, 1.0);
       }
     `,
   });
@@ -197,9 +252,10 @@ async function main() {
   const simulationShaderModule = device.createShaderModule({
     label: "Simulation Shader Module",
     code: /*wgsl*/ `
-      @group(0) @binding(0) var<uniform> gridSize: vec2f;
-      @group(0) @binding(1) var<storage> gridCurrentState: array<u32>;
-      @group(0) @binding(2) var<storage, read_write> gridNextState: array<u32>;
+      @group(0) @binding(0) var<uniform> time: f32;
+      @group(0) @binding(1) var<uniform> gridSize: vec2f;
+      @group(0) @binding(2) var<storage> gridCurrentState: array<u32>;
+      @group(0) @binding(3) var<storage, read_write> gridNextState: array<u32>;
 
       fn indexOf(x: u32, y: u32) -> u32 {
         return (y % u32(gridSize.y)) * u32(gridSize.x) + (x % u32(gridSize.x));
@@ -282,6 +338,9 @@ async function main() {
     requestAnimationFrame(render);
 
     const encoder = device.createCommandEncoder();
+
+    timeData.set([time]);
+    device.queue.writeBuffer(timeBuffer, 0, timeData);
 
     if (simulationTimeDelta >= STEP_RATE) {
       lastSimulationTime = time;

@@ -30,11 +30,11 @@ async function getWebGPU() {
 async function main() {
   const { canvas, context, device, format } = await getWebGPU();
 
-  canvas.height = 480;
+  canvas.height = 640;
   canvas.width = canvas.height;
 
   const CELL_SIZE = 0.5;
-  const GRID_SIZE = 64;
+  const GRID_SIZE = 64 * 2;
   const WORKGROUP_SIZE = 8;
   const STEP_RATE = 200;
 
@@ -75,9 +75,9 @@ async function main() {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     }),
   ];
-  // for (let i = 0; i < gridStateData.length; i += 1) {
-  //   gridStateData[i] = Math.random() >= 0.6 ? 1 : 0;
-  // }
+  for (let i = 0; i < gridStateData.length; i += 1) {
+    gridStateData[i] = Math.random() <= 0.1 ? 1 : 0;
+  }
   device.queue.writeBuffer(gridStateBuffers[1], 0, gridStateData);
   device.queue.writeBuffer(gridStateBuffers[0], 0, gridStateData);
 
@@ -240,38 +240,30 @@ async function main() {
         return output;
       }
 
-      const animationLength = 1000.0;
+      const keyframeLength = 1000.0;
+
+      const keyframes = array(
+        vec4f(1, 0, 0, 1),
+        vec4f(1, 1, 0, 1),
+        vec4f(0, 1, 0, 1),
+        vec4f(0, 1, 1, 1),
+        vec4f(0, 0, 1, 1),
+        vec4f(0, 1, 1, 1),
+        vec4f(0, 1, 0, 1),
+        vec4f(1, 1, 0, 1),
+        vec4f(1, 0, 0, 1),
+      );
+
+      const keyframesTotal = 9.0;
 
       @fragment
       fn fmain(input: VertexOutput) -> @location(0) vec4f {
         // let index = input.cell / gridSize;
 
-        let l = time / animationLength; // Loop count.
-        let p = l % 1; // Loop progress.
-        var color = vec3f(0);
+        let keyframeIndex = u32(floor(time / keyframeLength) % keyframesTotal);
+        let keyframeProgress = fract(time / keyframeLength);
 
-        switch u32(floor(l % 6)) {
-          case 0: {
-            color = vec3f(1, mix(0, 1, p), 0);
-          }
-          case 1: {
-            color = vec3f(mix(1, 0, p), 1, 0);
-          }
-          case 2: {
-            color = vec3f(0, 1, mix(0, 1, p));
-          }
-          case 3: {
-            color = vec3f(0, mix(1, 0, p), 1);
-          }
-          case 4: {
-            color = vec3f(mix(0, 1, p), 0, 1);
-          }
-          default: {
-            color = vec3f(1, 0, mix(1, 0, p));
-          }
-        }
-
-        return vec4f(color + 0.25, 1.0);
+        return mix(keyframes[keyframeIndex], keyframes[keyframeIndex + 1], keyframeProgress);
       }
     `,
   });
@@ -307,6 +299,11 @@ async function main() {
           if (all(mouseGridPosition == cell.xy)) {
             gridNextState[i] = 1;
           }
+
+          return;
+        }
+
+        if (floor(time % 500) > 32) {
           return;
         }
 

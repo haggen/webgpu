@@ -33,18 +33,19 @@ async function main() {
   canvas.height = 640;
   canvas.width = canvas.height;
 
-  const CELL_SIZE = 0.5;
-  const GRID_SIZE = 64 * 2;
+  const CELL_SIZE = 0.75;
+  const GRID_SIZE = 64;
   const WORKGROUP_SIZE = 8;
-  const STEP_RATE = 200;
+  const STEP_RATE = 8;
 
-  const timeData = new Float32Array([0]);
-  const timeBuffer = device.createBuffer({
-    label: "Time",
-    size: timeData.byteLength,
+  // Frame, Time, Last Render Time
+  const renderInfoData = new Float32Array([0, 0, 0]);
+  const renderInfoBuffer = device.createBuffer({
+    label: "Render Info",
+    size: renderInfoData.byteLength,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  device.queue.writeBuffer(timeBuffer, 0, timeData);
+  device.queue.writeBuffer(renderInfoBuffer, 0, renderInfoData);
 
   const mouseData = new Float32Array([0, 0, 0]);
   const mouseBuffer = device.createBuffer({
@@ -62,24 +63,17 @@ async function main() {
   });
   device.queue.writeBuffer(gridSizeBuffer, 0, gridSizeData);
 
-  const gridStateData = new Uint32Array(GRID_SIZE * GRID_SIZE).fill(0);
-  const gridStateBuffers = [
-    device.createBuffer({
-      label: "Grid State",
-      size: gridStateData.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    }),
-    device.createBuffer({
-      label: "Grid State",
-      size: gridStateData.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    }),
-  ];
-  for (let i = 0; i < gridStateData.length; i += 1) {
+  // Holds the current and next state of the grid as a single buffer.
+  const gridStateData = new Uint32Array(GRID_SIZE * GRID_SIZE * 2).fill(0);
+  const gridStateBuffer = device.createBuffer({
+    label: "Grid State",
+    size: gridStateData.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  for (let i = 0, l = gridStateData.length; i < l; i += 1) {
     gridStateData[i] = Math.random() <= 0.1 ? 1 : 0;
   }
-  device.queue.writeBuffer(gridStateBuffers[1], 0, gridStateData);
-  device.queue.writeBuffer(gridStateBuffers[0], 0, gridStateData);
+  device.queue.writeBuffer(gridStateBuffer, 0, gridStateData);
 
   const cellVertexData = new Float32Array([
     -CELL_SIZE,
@@ -102,8 +96,8 @@ async function main() {
   });
   device.queue.writeBuffer(cellVertexBuffer, 0, cellVertexData);
 
-  const bindGroupLayout = device.createBindGroupLayout({
-    label: "Bind Group Layout",
+  const renderBindGroupLayoutDescriptor = {
+    label: "Render Bind Group Layout",
     entries: [
       {
         binding: 0,
@@ -137,85 +131,93 @@ async function main() {
       },
       {
         binding: 3,
-        visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
+        visibility:
+          GPUShaderStage.VERTEX |
+          GPUShaderStage.FRAGMENT |
+          GPUShaderStage.COMPUTE,
         buffer: { type: "read-only-storage" },
       },
+    ],
+  } satisfies GPUBindGroupLayoutDescriptor;
+
+  const renderBindGroupLayout = device.createBindGroupLayout(
+    renderBindGroupLayoutDescriptor
+  );
+
+  const computeBindGroupLayoutDescriptor = {
+    label: "Compute Bind Group Layout",
+    entries: [
+      renderBindGroupLayoutDescriptor.entries[0],
+      renderBindGroupLayoutDescriptor.entries[1],
+      renderBindGroupLayoutDescriptor.entries[2],
       {
-        binding: 4,
+        binding: 3,
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "storage" },
       },
     ],
+  } satisfies GPUBindGroupLayoutDescriptor;
+
+  const computeBindGroupLayout = device.createBindGroupLayout(
+    computeBindGroupLayoutDescriptor
+  );
+
+  const renderBindGroupDescriptor = {
+    label: "Render Bind Group",
+    layout: renderBindGroupLayout,
+    entries: [
+      {
+        binding: 0,
+        resource: { buffer: renderInfoBuffer },
+      },
+      {
+        binding: 1,
+        resource: { buffer: mouseBuffer },
+      },
+      {
+        binding: 2,
+        resource: { buffer: gridSizeBuffer },
+      },
+      {
+        binding: 3,
+        resource: { buffer: gridStateBuffer },
+      },
+    ],
+  } satisfies GPUBindGroupDescriptor;
+
+  const renderBindGroup = device.createBindGroup(renderBindGroupDescriptor);
+
+  const computeBindGroupDescriptor = {
+    label: "Compute Bind Group",
+    layout: computeBindGroupLayout,
+    entries: renderBindGroupDescriptor.entries,
+  } satisfies GPUBindGroupDescriptor;
+
+  const computeBindGroup = device.createBindGroup(computeBindGroupDescriptor);
+
+  const renderPipelineLayout = device.createPipelineLayout({
+    label: "Render Pipeline Layout",
+    bindGroupLayouts: [renderBindGroupLayout],
   });
 
-  const bindGroups = [
-    device.createBindGroup({
-      label: "Bind Group A",
-      layout: bindGroupLayout,
-      entries: [
-        {
-          binding: 0,
-          resource: { buffer: timeBuffer },
-        },
-        {
-          binding: 1,
-          resource: { buffer: mouseBuffer },
-        },
-        {
-          binding: 2,
-          resource: { buffer: gridSizeBuffer },
-        },
-        {
-          binding: 3,
-          resource: { buffer: gridStateBuffers[1] },
-        },
-        {
-          binding: 4,
-          resource: { buffer: gridStateBuffers[0] },
-        },
-      ],
-    }),
-
-    device.createBindGroup({
-      label: "Bind Group B",
-      layout: bindGroupLayout,
-      entries: [
-        {
-          binding: 0,
-          resource: { buffer: timeBuffer },
-        },
-        {
-          binding: 1,
-          resource: { buffer: mouseBuffer },
-        },
-        {
-          binding: 2,
-          resource: { buffer: gridSizeBuffer },
-        },
-        {
-          binding: 3,
-          resource: { buffer: gridStateBuffers[0] },
-        },
-        {
-          binding: 4,
-          resource: { buffer: gridStateBuffers[1] },
-        },
-      ],
-    }),
-  ];
-
-  const pipelinesSharedLayout = device.createPipelineLayout({
-    label: "Pipelines Shared Layout",
-    bindGroupLayouts: [bindGroupLayout],
+  const computePipelineLayout = device.createPipelineLayout({
+    label: "Compute Pipeline Layout",
+    bindGroupLayouts: [computeBindGroupLayout],
   });
 
   const renderShaderModule = device.createShaderModule({
     label: "Render Shader Module",
     code: /*wgsl*/ `
-      @group(0) @binding(0) var<uniform> time: f32;
+      struct RenderInfo {
+        frame: f32,
+        time: f32,
+        lastRenderTime: f32,
+      };
+
+      @group(0) @binding(0) var<uniform> renderInfo: RenderInfo;
       @group(0) @binding(1) var<uniform> mouse: vec3f;
       @group(0) @binding(2) var<uniform> gridSize: vec2f;
-      @group(0) @binding(3) var<storage> gridCurrentState: array<u32>;
+      @group(0) @binding(3) var<storage> gridState: array<u32>;
 
       struct VertexInput {
         @location(0) position: vec2f,
@@ -232,7 +234,7 @@ async function main() {
         let i = f32(input.index);
         let cell = vec2f(i % gridSize.x, floor(i / gridSize.x));
         let offset = cell / gridSize * 2;
-        let position = (input.position * f32(gridCurrentState[input.index]) + 1) / gridSize - 1 + offset;
+        let position = (input.position * f32(gridState[input.index]) + 1) / gridSize - 1 + offset;
 
         var output: VertexOutput;
         output.position = vec4f(position, 0, 1);
@@ -258,37 +260,47 @@ async function main() {
 
       @fragment
       fn fmain(input: VertexOutput) -> @location(0) vec4f {
-        // let index = input.cell / gridSize;
+        let t = renderInfo.time;
 
-        let keyframeIndex = u32(floor(time / keyframeLength) % keyframesTotal);
-        let keyframeProgress = fract(time / keyframeLength);
+        let keyframeIndex = u32(floor(t / keyframeLength) % keyframesTotal);
+        let keyframeProgress = fract(t / keyframeLength);
 
         return mix(keyframes[keyframeIndex], keyframes[keyframeIndex + 1], keyframeProgress);
       }
     `,
   });
 
-  const simulationShaderModule = device.createShaderModule({
-    label: "Simulation Shader Module",
+  const computeShaderModule = device.createShaderModule({
+    label: "Compute Shader Module",
     code: /*wgsl*/ `
-      @group(0) @binding(0) var<uniform> time: f32;
+      struct RenderInfo {
+        frame: f32,
+        time: f32,
+        lastRenderTime: f32,
+      };
+
+      @group(0) @binding(0) var<uniform> renderInfo: RenderInfo;
       @group(0) @binding(1) var<uniform> mouse: vec3f;
       @group(0) @binding(2) var<uniform> gridSize: vec2f;
-      @group(0) @binding(3) var<storage> gridCurrentState: array<u32>;
-      @group(0) @binding(4) var<storage, read_write> gridNextState: array<u32>;
+      @group(0) @binding(3) var<storage, read_write> gridState: array<u32>;
 
-      fn indexOf(x: u32, y: u32) -> u32 {
+      fn getIndex(x: u32, y: u32) -> u32 {
         return (y % u32(gridSize.y)) * u32(gridSize.x) + (x % u32(gridSize.x));
       }
 
-      fn stateOf(x: u32, y: u32) -> u32 {
-        return gridCurrentState[indexOf(x, y)];
+      fn getState(x: u32, y: u32) -> u32 {
+        return gridState[getIndex(x, y)];
+      }
+
+      fn setNextStateAt(index: u32, state: u32) {
+        let offset = u32(gridSize.x * gridSize.y);
+        gridState[offset + index] = state;
       }
 
       @compute
       @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
       fn cmain(@builtin(global_invocation_id) cell: vec3u) {
-        let i = indexOf(cell.x, cell.y);
+        let i = getIndex(cell.x, cell.y);
 
         if ((u32(mouse.z) & 1) == 1) {
           let mouseGridPosition = vec2u(
@@ -297,31 +309,36 @@ async function main() {
           );
 
           if (all(mouseGridPosition == cell.xy)) {
-            gridNextState[i] = 1;
+            gridState[i] = 1;
           }
 
           return;
         }
 
-        if (floor(time % 500) > 32) {
+        if (floor(renderInfo.frame % ${STEP_RATE}) > 0) {
           return;
         }
 
-        let n = stateOf(cell.x + 1, cell.y + 1) + stateOf(cell.x + 1, cell.y) +
-          stateOf(cell.x + 1, cell.y - 1) + stateOf(cell.x, cell.y - 1) +
-          stateOf(cell.x - 1, cell.y - 1) + stateOf(cell.x - 1, cell.y) +
-          stateOf(cell.x - 1, cell.y + 1) + stateOf(cell.x, cell.y + 1);
+        let activeNeighbors = getState(cell.x + 1, cell.y + 1) + getState(cell.x + 1, cell.y) +
+          getState(cell.x + 1, cell.y - 1) + getState(cell.x, cell.y - 1) +
+          getState(cell.x - 1, cell.y - 1) + getState(cell.x - 1, cell.y) +
+          getState(cell.x - 1, cell.y + 1) + getState(cell.x, cell.y + 1);
 
-        switch n {
+        switch activeNeighbors {
           case 2: {
-            gridNextState[i] = gridCurrentState[i];
+            setNextStateAt(i, gridState[i]);
           }
           case 3: {
-            gridNextState[i] = 1;
+            setNextStateAt(i, 1);
           }
           default: {
-            gridNextState[i] = 0;
+            setNextStateAt(i, 0);
           }
+        }
+
+        let offset = u32(gridSize.x * gridSize.y);
+        for (var i = 0u; i < offset; i += 1) {
+          gridState[i] = gridState[offset + i];
         }
       }
     `,
@@ -329,7 +346,7 @@ async function main() {
 
   const renderPipeline = device.createRenderPipeline({
     label: "Render Pipeline",
-    layout: pipelinesSharedLayout,
+    layout: renderPipelineLayout,
     vertex: {
       module: renderShaderModule,
       buffers: [
@@ -355,17 +372,13 @@ async function main() {
     },
   });
 
-  const simulationPipeline = device.createComputePipeline({
+  const computePipeline = device.createComputePipeline({
     label: "Simulation Pipeline",
-    layout: pipelinesSharedLayout,
+    layout: computePipelineLayout,
     compute: {
-      module: simulationShaderModule,
+      module: computeShaderModule,
     },
   });
-
-  let lastSimulationTime = 0;
-  let lastRenderTime = 0;
-  let step = 1;
 
   const mouse = { x: 0, y: 0, pressed: 0 };
 
@@ -390,32 +403,27 @@ async function main() {
     event.preventDefault();
   });
 
+  let lastRenderTime = 0;
+  let frame = 0;
+
   function render(time: number) {
-    const simulationTimeDelta = time - lastSimulationTime;
     const renderTimeDelta = time - lastRenderTime;
     lastRenderTime = time;
 
-    requestAnimationFrame(render);
-
     const encoder = device.createCommandEncoder();
 
-    timeData.set([time]);
-    device.queue.writeBuffer(timeBuffer, 0, timeData);
+    renderInfoData.set([frame, time, lastRenderTime]);
+    device.queue.writeBuffer(renderInfoBuffer, 0, renderInfoData);
 
     mouseData.set([mouse.x, mouse.y, mouse.pressed]);
     device.queue.writeBuffer(mouseBuffer, 0, mouseData);
 
-    if (simulationTimeDelta >= 1) {
-      lastSimulationTime = time;
-      step += 1;
-
-      const computePass = encoder.beginComputePass();
-      const workgroupCount = Math.ceil(GRID_SIZE / WORKGROUP_SIZE);
-      computePass.setPipeline(simulationPipeline);
-      computePass.setBindGroup(0, bindGroups[step % 2]);
-      computePass.dispatchWorkgroups(workgroupCount, workgroupCount);
-      computePass.end();
-    }
+    const computePass = encoder.beginComputePass();
+    const workgroupCount = Math.ceil(GRID_SIZE / WORKGROUP_SIZE);
+    computePass.setPipeline(computePipeline);
+    computePass.setBindGroup(0, computeBindGroup);
+    computePass.dispatchWorkgroups(workgroupCount, workgroupCount);
+    computePass.end();
 
     const renderPass = encoder.beginRenderPass({
       colorAttachments: [
@@ -428,14 +436,19 @@ async function main() {
     });
     renderPass.setPipeline(renderPipeline);
     renderPass.setVertexBuffer(0, cellVertexBuffer);
-    renderPass.setBindGroup(0, bindGroups[step % 2]);
+    renderPass.setBindGroup(0, renderBindGroup);
     renderPass.draw(cellVertexData.length / 2, GRID_SIZE * GRID_SIZE);
     renderPass.end();
 
     device.queue.submit([encoder.finish()]);
+
+    frame += 1;
+    requestAnimationFrame(render);
   }
 
   requestAnimationFrame(render);
 }
 
-main();
+main().catch((err: Error) => {
+  alert(err.message);
+});
